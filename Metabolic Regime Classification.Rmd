@@ -25,46 +25,25 @@ library(streamMetabolizer) # needed for simulated light data and conversions
 library(dataRetrieval) # retrieve hydro data from USGS
 library(googledrive) # download and upload with CURB drive folder
 library(tidyverse) # plotting with ggplot and using dplyr tools
+library(readxl) # read excel files
 library(plotly) # fancy plots for reports
-library(zoo) # 
-
-
+library(zoo) # for linear interpolation of small gaps in time series
 
 ```
 
 
 ```{r metadata, include=FALSE}
 
-# Pull the metadata table from Google Drive
+# read in the metadata
 
-# sign in to a Google account that has access to the "CURB (new! Use me!)" folder
-drive_auth() 
-
-# pull the metadata from 
-drive_download(file = googledrive::as_id("1lvuHGOfiKprXMsxWZaZt7ue0XYm88-5E"),
-               
-               # choose where to save the metadata file locally
-               path = paste0(getwd(),"/my_streams_metadata.csv"),
-               
-               # metadata is saved as a Google spreadsheet
-               type = "spreadsheets",
-               
-               # we want to have the latest version
-               overwrite = TRUE)
-
-# 
-boston_data <- read_excel(paste0(getwd(),"/boston_sensors_clean.csv"))
-
+my_streams <- read_csv("my_streams.csv")
 
 ```
 
 
 ```{r Boston, echo=F}
 
-drive_download(file = "1rMwhefD_Ve75bP4pcPSVpMjFWUht6c_H6ZcpNTTQ3MM",
-               path = paste0(getwd(),"/boston_sensors_clean.xlsx"))
-
-boston_data <- read_excel(paste0(getwd(),"/boston_sensors_clean.csv")) %>% 
+boston_data <- read_excel("boston_sensors_clean.xlsx", na = c("","NA")) %>%
   rename(DO.obs = do_mgl, dateTime = datetime, temp.water = temp_c)
 
 boston_data$dateTime <- as.POSIXct(boston_data$dateTime, tz = "EST", 
@@ -109,7 +88,7 @@ for(i in 1:nrow(my_streams)){
     }
 
     if(my_streams$SN[i]=="SB"){
-      boston_stream_data <- boston_stream_data[-37634,]
+      boston_stream_data <- boston_stream_data[-37630,]
     }
     
     
@@ -121,7 +100,7 @@ for(i in 1:nrow(my_streams)){
     clean_data <- mm_filter_valid_days(boston_stream_data)$data
     
     write.csv(clean_data[,c(13, 8, 15, 17, 5, 14, 16)], 
-              file = paste0(getwd(),"/",my_streams$SN[i],"_metab_input.csv"), 
+              file = paste0(my_streams$streamname[i],"_metab_input.csv"), 
               row.names=F)
     rm(boston_stream_data)
     rm(boston_hydro)
