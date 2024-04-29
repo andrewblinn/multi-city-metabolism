@@ -1,0 +1,366 @@
+---
+title: "Metab_In"
+author: "Andrew Blinn"
+date: "1/5/2022"
+output: html_document
+---
+
+The purpose of this script is to take in sensor data from the CURB Google Drive
+and output processed files ready for modeling. Annotated meta data including any 
+alterations to sensor check times made based on evidence of out-of-sensor or
+flagged as having poor data quality. Output files are saved locally in addition
+to being uploaded to Google Drive. These local files can then be uploaded to the
+GACRC at a later time. Alternative output formats for data sharing are possible
+but not yet supported.
+
+When prompted, log in to a Google account to access CURB (new! Use me!).
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = FALSE)
+
+# Install packages as necessary
+
+library(streamMetabolizer) # needed for simulated light data and conversions
+library(dataRetrieval) # retrieve hydro data from USGS
+library(googledrive) # download and upload with CURB drive folder
+library(tidyverse) # plotting with ggplot and using dplyr tools
+library(plotly) # fancy plots for reports
+library(zoo) # 
+
+
+
+```
+
+
+```{r metadata, include=FALSE}
+
+# Pull the metadata table from Google Drive
+
+# sign in to a Google account that has access to the "CURB (new! Use me!)" folder
+drive_auth() 
+
+# pull the metadata from 
+drive_download(file = googledrive::as_id("1lvuHGOfiKprXMsxWZaZt7ue0XYm88-5E"),
+               
+               # choose where to save the metadata file locally
+               path = paste0(getwd(),"/my_streams_metadata.csv"),
+               
+               # metadata is saved as a Google spreadsheet
+               type = "spreadsheets",
+               
+               # we want to have the latest version
+               overwrite = TRUE)
+
+# 
+boston_data <- read_excel(paste0(getwd(),"/boston_sensors_clean.csv"))
+
+
+```
+
+
+```{r Boston, echo=F}
+
+drive_download(file = "1rMwhefD_Ve75bP4pcPSVpMjFWUht6c_H6ZcpNTTQ3MM",
+               path = paste0(getwd(),"/boston_sensors_clean.xlsx"))
+
+boston_data <- read_excel(paste0(getwd(),"/boston_sensors_clean.csv")) %>% 
+  rename(DO.obs = do_mgl, dateTime = datetime, temp.water = temp_c)
+
+boston_data$dateTime <- as.POSIXct(boston_data$dateTime, tz = "EST", 
+                               format = "%m/%d/%y %H:%M")
+
+
+for(i in 1:nrow(my_streams)){
+  
+  # focus on one city at a time - starting alphabetically with Boston, MA, USA
+  if(my_streams$zone[i]=="BOS"){
+    # split data file into separate frames for each stream site in this city
+    boston_stream_data <- boston_data[boston_data$site==my_streams$streamname[i],]
+    
+    # calculate solar time using site longitude
+    boston_stream_data$solar.time <- calc_solar_time(boston_stream_data$dateTime, 
+                                              as.numeric(my_streams$longitude[i]))
+    
+    # simulate light in PAR (umol m^-2 s^-1)
+    boston_stream_data$light <- calc_light(boston_stream_data$solar.time, 
+                                    as.numeric(my_streams$latitude[i]),
+                                    as.numeric(my_streams$longitude[i]))
+    
+    # calculate 100% DO saturation concentration (mg/L)
+    boston_stream_data$DO.sat <- calc_DO_sat(boston_stream_data$temp.water, 
+                                      (boston_stream_data$BP_mmHg)*1.33322)
+    
+    # and discharge
+    boston_hydro <- readNWISuv(my_streams$gage[i], 
+                            c("00060", "00065"), 
+                            tz = my_streams$timezone[i],
+                        startDate = my_streams$start[i], 
+                        endDate = my_streams$end[i])
+
+    boston_hydro$discharge <- boston_hydro$X_00060_00000/35.315
+    boston_hydro$depth <- boston_hydro$X_00065_00000/3.28084
+    
+    boston_stream_data <- merge(boston_stream_data, boston_hydro[,c(3,9,10)], all.x = T)
+    boston_stream_data <- distinct(boston_stream_data, solar.time, .keep_all = T)
+    
+    if(my_streams$SN[i]=="AB"){
+      boston_stream_data <- boston_stream_data[-37614,]
+    }
+
+    if(my_streams$SN[i]=="SB"){
+      boston_stream_data <- boston_stream_data[-37634,]
+    }
+    
+    
+    boston_stream_data$discharge <- na.approx(boston_stream_data$discharge)
+    boston_stream_data$depth <- na.approx(boston_stream_data$depth)
+
+    boston_stream_data <- distinct(boston_stream_data, solar.time, .keep_all = T)
+    
+    clean_data <- mm_filter_valid_days(boston_stream_data)$data
+    
+    write.csv(clean_data[,c(13, 8, 15, 17, 5, 14, 16)], 
+              file = paste0(getwd(),"/",my_streams$SN[i],"_metab_input.csv"), 
+              row.names=F)
+    rm(boston_stream_data)
+    rm(boston_hydro)
+    rm(clean_data)
+  }
+}
+
+```
+
+Now go run the input files through the metabolism model and come back!
+
+
+Load list of .RData files and compile output into single .csv [BROKEN - do this one stream at a time and manually combine them]
+```{r}
+
+for(i in 1:nrow(my_streams)){
+  
+  # Load model objects from metabolism.Rmd
+  load(file = paste0("D:/STORMS Model Objects/1k_1k_OSC_Output/", 
+                    my_streams$SN[my_streams$streamname==stream_name], "/",filelist[i]))
+  
+  # Merge daily estimates, bounds, deviation, and modeling error Rhat values to single dataframe
+  daily_metab <- data.frame(date = as.Date(mm@fit[["daily"]][["date"]]),
+                       Site =  my_streams$SN[i],
+                       
+                       GPP = mm@fit[["daily"]][["GPP_daily_50pct"]],
+                       GPP.lower = mm@fit[["daily"]][["GPP_daily_2.5pct"]],
+                       GPP.upper = mm@fit[["daily"]][["GPP_daily_97.5pct"]],
+                       GPP.daily.sd = mm@fit[["daily"]][["GPP_daily_sd"]],
+                    
+                       ER = mm@fit[["daily"]][["ER_daily_50pct"]],
+                       ER.lower = mm@fit[["daily"]][["ER_daily_2.5pct"]],
+                       ER.upper = mm@fit[["daily"]][["ER_daily_2.5pct"]],
+                       ER.daily.sd = mm@fit[["daily"]][["ER_daily_sd"]],
+                       
+                       K600.daily = mm@fit[["daily"]][["K600_daily_50pct"]],
+                       K600.daily.sd = mm@fit[["daily"]][["K600_daily_sd"]],
+                       GPP_daily_n_eff = mm@fit[["daily"]][["GPP_daily_n_eff"]],
+                       GPP_daily_Rhat = mm@fit[["daily"]][["GPP_daily_Rhat"]],
+                       ER_daily_n_eff = mm@fit[["daily"]][["ER_daily_n_eff"]],
+                       ER_daily_Rhat = mm@fit[["daily"]][["ER_daily_Rhat"]],
+                       K600_daily_n_eff = mm@fit[["daily"]][["K600_daily_n_eff"]],
+                       K600_daily_Rhat = mm@fit[["daily"]][["K600_daily_Rhat"]],
+                       
+                       warnings = mm@fit[["daily"]][["warnings"]],
+                       errors = mm@fit[["daily"]][["errors"]])
+  
+  # Save dataframe as table to append with each new chunk, saving column names on first iteration
+  write.table(daily_metab, "_daily_metab.csv", 
+              append = ifelse(i==1, F, T), row.names = F, 
+              col.names = ifelse(i==1, T, F), sep = ",")
+  
+  # Remove the large model object and associated dataframe before proceeding
+  rm(mm)
+  rm(daily_metab)
+}
+
+rm(filelist)
+
+```
+
+
+Add relevant daily statistics and summaries to rows of daily_metab dataframe
+```{r}
+
+daily_metab <- read.csv("CURB_BOS_daily_metab.csv")
+daily_metab$date <- as.Date(daily_metab$date)
+
+#peak discharge value from storm day (time period from sunset day prior to sunset present day)
+lead_peak <- MyStream[!is.na(MyStream$discharge),]%>%group_by(Date_m)%>%summarize(lead_peak=max(discharge))
+#selecting rows where daily_metab$Site==SN if daily_metab dataframe includes more than one stream site
+daily_metab_summary <- merge(daily_metab[daily_metab$Site==my_streams$SN[my_streams$streamname==stream_name],], 
+               lead_peak, by.x="date", by.y="Date_m", all=T)
+rm(lead_peak)
+rm(daily_metab)
+
+#peak depth value from storm day
+depth_peak <-  MyStream[!is.na(MyStream$depth),]%>%group_by(Date_m)%>%summarize(depth_peak=max(depth))
+daily_metab_summary <- merge(daily_metab_summary,depth_peak, by.x="date", by.y="Date_m", all=T)
+rm(depth_peak)
+
+#estimated total daily discharge from mean discharge converted from cubic meters/sec to cubic meters/day
+daily_dis <- MyStream[!is.na(MyStream$discharge),]%>%group_by(Date_m)%>%summarize(daily_dis=mean(discharge)*86400)
+daily_metab_summary <- merge(daily_metab_summary, daily_dis, by.x="date", by.y="Date_m", all=T)
+rm(daily_dis)
+
+#median daily discharge cubic meters/sec
+median_lead_peak <- MyStream[!is.na(MyStream$discharge),]%>%group_by(Date_m)%>%
+  summarize(median_dis=median(as.double(discharge)))
+daily_metab_summary <- merge(daily_metab_summary, median_lead_peak, by.x="date", by.y="Date_m", all=T)
+rm(median_lead_peak)
+
+#mean daily discharge cubic meters/sec
+mean_dis <- MyStream[!is.na(MyStream$discharge),]%>%group_by(Date_m)%>%
+  summarize(mean_dis=mean(as.double(discharge)))
+daily_metab_summary <- merge(daily_metab_summary, mean_dis, by.x="date", by.y="Date_m", all=T)
+rm(mean_dis)
+
+#daily discharge sd cubic meters/sec
+mean_dis.sd <- MyStream[!is.na(MyStream$discharge),]%>%group_by(Date_m)%>%
+  summarize(mean_dis.sd=sd(as.double(discharge)))
+daily_metab_summary <- merge(daily_metab_summary, mean_dis.sd, by.x="date", by.y="Date_m", all=T)
+rm(mean_dis.sd)
+
+#mean daily depth cubic meters
+mean_depth <- MyStream[!is.na(MyStream$depth),]%>%group_by(Date_m)%>%
+  summarize(mean_depth=mean(as.double(depth)))
+daily_metab_summary <- merge(daily_metab_summary, mean_depth, by.x="date", by.y="Date_m", all=T)
+rm(mean_depth)
+
+#mean daily depth cubic meters
+mean_depth.sd <- MyStream[!is.na(MyStream$depth),]%>%group_by(Date_m)%>%
+  summarize(mean_depth.sd=sd(as.double(depth)))
+daily_metab_summary <- merge(daily_metab_summary, mean_depth.sd, by.x="date", by.y="Date_m", all=T)
+rm(mean_depth.sd)
+
+#peak turbidity value from calendar day
+turb_peak <- MyStream[!is.na(MyStream$turb),]%>%group_by(Date_m)%>%summarize(turb_peak=max(turb))
+daily_metab_summary <- merge(daily_metab_summary, turb_peak, by.x="date", by.y="Date_m", all=T)
+rm(turb_peak)
+
+#mean turbidity from calendar day
+turb_mean <- MyStream[!is.na(MyStream$turb),]%>%group_by(Date_m)%>%summarize(turb_mean=mean(turb))
+daily_metab_summary <- merge(daily_metab_summary, turb_mean, by.x="date", by.y="Date_m", all=T)
+rm(turb_mean)
+
+#mean temperature from calendar day
+temp <- MyStream[!is.na(MyStream$temp.water),]%>%group_by(Date_m)%>%summarize(temp_mean=mean(temp.water))
+daily_metab_summary <- merge(daily_metab_summary, temp, by.x="date", by.y="Date_m", all=T)
+rm(temp)
+
+#temperature sd from calendar day
+temp.sd <- MyStream[!is.na(MyStream$tempC),]%>%group_by(Date_m)%>%summarize(temp_mean.sd=sd(tempC))
+daily_metab_summary <- merge(daily_metab_summary, temp.sd, by.x="date", by.y="Date_m", all=T)
+rm(temp.sd)
+
+#mean conductivity from calendar day
+cond <- MyStream[!is.na(MyStream$cond),]%>%group_by(Date_m)%>%summarize(cond_mean=mean(cond))
+daily_metab_summary <- merge(daily_metab_summary, cond, by.x="date", by.y="Date_m", all=T)
+rm(cond)
+
+#estimated total daily PAR from mean PAR converted from millimoles/ square meter sec to moles/ square meter day
+light <- MyStream[!is.na(MyStream$sat_PAR),]%>%group_by(Date_m)%>%summarize(DLI=(mean(sat_PAR)*0.0864))
+daily_metab_summary <- merge(daily_metab_summary,light, by.x="date", by.y="Date_m", all=T)
+rm(light)
+
+if(my_streams$zone[my_streams$streamname==stream_name]=="Denver"){
+
+  #attaches event indicator from Wilson & Bhaskar code
+  storm <- MyStream[!is.na(MyStream$EventInd),]%>%group_by(Date_m)%>%summarize(storm_ind=max(EventInd))
+  daily_metab_summary <- merge(daily_metab_summary,storm, by.x="date", by.y="Date_m", all=T)
+  rm(storm)
+}
+
+
+#indexes each high flow event
+
+if(my_streams$zone[my_streams$streamname==stream_name]=="Cleveland"){
+  
+  daily_metab_summary$storm_id <- NA
+  median_lead_peak <- median(daily_metab_summary$lead_peak[daily_metab_summary$date>=as.Date("2018-10-1")&
+                                                             daily_metab_summary$date<=as.Date("2020-09-30")],
+                             na.rm = TRUE)
+  storm.id <- 0
+  
+  for(i in 1:nrow(daily_metab_summary[!is.na(daily_metab_summary$date),])){
+    if(is.na(daily_metab_summary$lead_peak[i])||daily_metab_summary$date[i]<as.Date("2018-10-1")||
+       daily_metab_summary$date[i]>as.Date("2020-09-30")){
+      daily_metab_summary$storm_id[i] <- NA
+      next
+    }
+    if(daily_metab_summary$lead_peak[i]<=median_lead_peak){
+      daily_metab_summary$storm_id[i] <- 0
+      next
+    }
+    if(daily_metab_summary$lead_peak[i]>median_lead_peak){
+      if(!is.na(daily_metab_summary$storm_id[i-1])&&daily_metab_summary$storm_id[i-1]>0){
+        daily_metab_summary$storm_id[i] <- daily_metab_summary$storm_id[i-1]
+        next
+      }else{
+        storm.id <- storm.id +1
+        daily_metab_summary$storm_id[i] <- storm.id
+        next
+      }
+    }
+  }
+  rm(median_lead_peak)
+}
+
+if(my_streams$zone[my_streams$streamname==stream_name]=="Denver"){
+  
+  daily_metab_summary$storm_id <- NA
+  storm.id <- 0
+  
+  for(i in 1:nrow(daily_metab_summary[!is.na(daily_metab_summary$date),])){
+    if(is.na(daily_metab_summary$lead_peak[i])||daily_metab_summary$date[i]<as.Date("2019-04-01")||
+       daily_metab_summary$date[i]>as.Date("2020-09-30")||is.na(daily_metab_summary$storm_ind[i])){
+      daily_metab_summary$storm_id[i] <- NA
+      next
+    }
+    if(daily_metab_summary$storm_ind[i]==0){
+      daily_metab_summary$storm_id[i] <- 0
+      next
+    }
+    if(daily_metab_summary$storm_ind[i]==1){
+      if(!is.na(daily_metab_summary$storm_id[i-1])&&daily_metab_summary$storm_id[i-1]>0){
+        daily_metab_summary$storm_id[i] <- daily_metab_summary$storm_id[i-1]
+        next
+      }else{
+        storm.id <- storm.id +1
+        daily_metab_summary$storm_id[i] <- storm.id
+        next
+      }
+    }
+  }
+}
+
+daily_metab_summary$Site <- my_streams$SN[my_streams$streamname==stream_name]
+
+#daily_metab_summary <- read.csv(file = paste0(getwd(),"/",stream_name,"/",my_streams$SN[my_streams$streamname==stream_name],"_results_v2.csv"), header = T)
+#daily_metab_summary$date <- as.Date(daily_metab_summary$date)
+
+
+for(i in 1:nrow(daily_metab_summary)){
+  for(h in 1:30){
+daily_metab_summary[i,paste0('GPP_h',h)]<-subset(daily_metab_summary,date==daily_metab_summary$date[i+h],select= GPP)
+daily_metab_summary[i,paste0('ER_h',h)]<-subset(daily_metab_summary,date==daily_metab_summary$date[i+h],select= ER)
+  }
+}
+
+  
+#Saves the daily estimates with relevant daily statistics
+write.csv(x = daily_metab_summary, file =
+            paste0(getwd(),"/",stream_name,"/",my_streams$SN[my_streams$streamname==stream_name],"_results_v2.csv"),
+          row.names = FALSE)
+
+rm(MyStream)
+rm(i)
+rm(storm.id)
+
+```
+
