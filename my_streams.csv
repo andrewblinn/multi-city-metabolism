@@ -1,0 +1,6 @@
+SN,streamname,timeszone,timezone,gage,zone,latitude,longitude,start,end
+RB,Red Butte Creek,America/Denver,MST,10172200,SLC,40.77994627,-111.806045,2019-10-01,2021-09-30
+LC,Little Cottonwood Creek,America/Denver,MST,10168000,SLC,40.664201,-111.898853,2023-02-20,2023-04-01
+AB,Alewife,America/New_York,EST,01103025,BOS,42.40704077,-71.1339422,2021-11-23,2022-12-22
+SB,StonyBrook,America/New_York,EST,01104370,BOS,42.38555556,-71.2894444,2021-11-23,2022-12-20
+BB,Beaver,America/New_York,EST,01104501,BOS,42.3786972,-71.2223722,2021-11-23,2022-12-19
