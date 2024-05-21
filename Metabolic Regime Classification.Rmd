@@ -23,7 +23,7 @@ knitr::opts_chunk$set(echo = FALSE)
 
 library(streamMetabolizer) # needed for simulated light data and conversions
 library(dataRetrieval) # retrieve hydro data from USGS
-library(googledrive) # download and upload with CURB drive folder
+# library(googledrive) # download and upload with CURB drive folder
 library(tidyverse) # plotting with ggplot and using dplyr tools
 library(readxl) # read excel files
 library(plotly) # fancy plots for reports
@@ -59,56 +59,56 @@ for(i in 1:nrow(my_streams)){
                               "00301"), # dissolved oxygen sat (% sat)
                             tz = "EST",
                             startDate = "2020-09-30", 
-                            endDate = "2022-10-01")
+                            endDate = "2022-10-01") %>%
+      
+      mutate(date = as.Date(dateTime),
+             temp.water = X_00010_00000, # degrees C
+             DO.obs = X_00300_00000, # mg per L
+             discharge = ifelse(i==11, 
+                                # SR24 is missing discharge data so use depth
+                                # coverted to meters before using equation
+                                (((X_00065_00000/3.28084)/0.409)^(1/0.294)), 
+                                # otherwise covert existing data
+                                X_00060_00000/35.315), # cfs to cms
+             depth = X_00065_00000/3.28084) # feet to meters
     
-    # read weather data and add to 
+    # read weather data and add to existing table
+    # from https://meteostat.net/en/place/us/atlanta?s=72219&t=2019-01-01/2021-12-31
+    atlanta_data <- merge(atlanta_data, read_csv("ATL_weather.csv"), by="date")
+    
     # calculate solar time using site longitude
-    atlanta_stream_data$solar.time <- calc_solar_time(atlanta_stream_data$dateTime, 
-                                              as.numeric(my_streams$longitude[i]))
+    atlanta_data$solar.time <- calc_solar_time(atlanta_data$dateTime,
+                                               as.numeric(my_streams$longitude[i]))
     
     # simulate light in PAR (umol m^-2 s^-1)
-    atlanta_stream_data$light <- calc_light(atlanta_stream_data$solar.time, 
+    atlanta_data$light <- calc_light(atlanta_data$solar.time, 
                                     as.numeric(my_streams$latitude[i]),
                                     as.numeric(my_streams$longitude[i]))
     
     # calculate 100% DO saturation concentration (mg/L)
-    atlanta_stream_data$DO.sat <- calc_DO_sat(atlanta_stream_data$temp.water, 
-                                      (atlanta_stream_data$BP_mmHg)*1.33322)
+    atlanta_data$DO.sat <- calc_DO_sat(atlanta_data$temp.water, # degrees C
+                                       atlanta_data$pres) # millibars
     
-    # and discharge
-    atlanta_hydro <- readNWISuv(my_streams$gage[i], 
-                            c("00060", "00065"), 
-                            tz = "EST",
-                            startDate = my_streams$start[i], 
-                            endDate = my_streams$end[i])
-
-    atlanta_hydro$discharge <- atlanta_hydro$X_00060_00000/35.315
-    atlanta_hydro$depth <- atlanta_hydro$X_00065_00000/3.28084
+    # cleaning steps
+    atlanta_data <- atlanta_data %>% 
+      
+      # sort by solar.time
+      arrange(solar.time) %>%
+      
+      # remove any repeat time steps
+      distinct(solar.time, .keep_all = T) %>%
+      
+      # keep only columns needed for modeling
+      select(solar.time, light, temp.water, DO.obs, DO.sat, depth, discharge)
     
-    atlanta_stream_data <- merge(atlanta_stream_data, atlanta_hydro[,c(3,9,10)], all.x = T)
-    atlanta_stream_data <- distinct(atlanta_stream_data, solar.time, .keep_all = T)
+    # filter to keep full model days
+    clean_data <- mm_filter_valid_days(atlanta_data)$data[,2:8]
     
-    if(my_streams$SN[i]=="AB"){
-      atlanta_stream_data <- atlanta_stream_data[-37614,]
-    }
-
-    if(my_streams$SN[i]=="SB"){
-      atlanta_stream_data <- atlanta_stream_data[-37630,]
-    }
-    
-    
-    atlanta_stream_data$discharge <- na.approx(atlanta_stream_data$discharge)
-    atlanta_stream_data$depth <- na.approx(atlanta_stream_data$depth)
-
-    atlanta_stream_data <- distinct(atlanta_stream_data, solar.time, .keep_all = T)
-    
-    clean_data <- mm_filter_valid_days(boston_stream_data)$data
-    
-    write.csv(clean_data[,c(13, 8, 15, 17, 5, 14, 16)], 
-              file = paste0(my_streams$streamname[i],"_metab_input.csv"), 
+    write.csv(clean_data, 
+              file = paste0(my_streams$CURB_ID[i],"_metab_input.csv"), 
               row.names=F)
-    rm(atlanta_stream_data)
-    rm(atlanta_hydro)
+    
+    rm(atlanta_data)
     rm(clean_data)
   }
 }
@@ -263,47 +263,77 @@ for(i in 1:nrow(my_streams)){
   # focus on one city at a time
   if(my_streams$city[i]=="PDX"){
     
-    # start with USGS data
-    portland_stream_data <- readNWISuv(my_streams$gage[i], 
-                                       c("00060", "00065","00010","00095"), 
-                                       tz = "PST",
-                                       startDate = my_streams$start[i], 
-                                       endDate = my_streams$end[i])
+    # pull all relevant data from USGS
+    portland_data <- readNWISuv(my_streams$gage[i], 
+                            c("00060", # discharge (f^3 s^-1)
+                              "00065", # gage height (f)
+                              "00010", # temperature (C)
+                              "00095", # specific conductance (uS/cm @ 25C)
+                              "00300", # dissolved oxygen (mg L^-1)
+                              "00301"), # dissolved oxygen sat (% sat)
+                            tz = "PST",
+                            startDate = "2019-10-01", 
+                            endDate = "2022-09-30") %>%
+      
+      mutate(date = as.Date(dateTime),
+             temp.water = X_00010_00000, # degrees C
+             DO.obs = X_00300_00000, # mg per L
+             discharge = X_00060_00000/35.315, # cfs to cms
+             depth = X_00065_00000/3.28084) # feet to meters
     
-    # split data file into separate frames for each stream site in this city
-    portland_stream_data <- portland_data[portland_data$site==my_streams$streamname[i],]
+    # read weather data and add to existing table
+    # from https://meteostat.net/en/place/us/portland?s=72219&t=2019-01-01/2021-12-31
+    portland_data <- merge(portland_data, read_csv("PDX_weather.csv"), by="date")
     
     # calculate solar time using site longitude
-    portland_stream_data$solar.time <- calc_solar_time(portland_stream_data$dateTime, 
-                                              as.numeric(my_streams$longitude[i]))
+    portland_data$solar.time <- calc_solar_time(portland_data$dateTime,
+                                               as.numeric(my_streams$longitude[i]))
     
     # simulate light in PAR (umol m^-2 s^-1)
-    portland_stream_data$light <- calc_light(portland_stream_data$solar.time, 
+    portland_data$light <- calc_light(portland_data$solar.time, 
                                     as.numeric(my_streams$latitude[i]),
                                     as.numeric(my_streams$longitude[i]))
     
+    # cleaning steps
+    portland_data <- portland_data %>% 
+      
+      # sort by solar.time
+      arrange(solar.time) %>%
+      
+      # remove any repeat time steps
+      distinct(solar.time, .keep_all = T) %>%
+      
+      # keep only columns needed for modeling
+      select(solar.time, light, temp.water, DO.obs, depth, discharge)
+    
+    # linear interpolation of 30-minute frequency water quality data to 15-min
+    zoo_temp.water_data <- zoo(portland_data$temp.water, portland_data$solar.time)
+    
+    portland_data$temp.water <- na.approx(zoo_temp.water_data, 
+                                          xout = portland_data$solar.time, 
+                                          rule = 2)
+    
+    rm(zoo_temp.water_data)
+    
+    # linear interpolation of 30-minute frequency water quality data to 15-min
+    zoo_DO.obs_data <- zoo(portland_data$DO.obs, portland_data$solar.time)
+    
+    portland_data$DO.obs <- na.approx(zoo_DO.obs_data, 
+                                          xout = portland_data$solar.time,
+                                          rule = 2)
+    
     # calculate 100% DO saturation concentration (mg/L)
-    portland_stream_data$DO.sat <- calc_DO_sat(portland_stream_data$temp.water, 
-                                      (portland_stream_data$BP_mmHg)*1.33322)
-
-    portland_hydro$discharge <- portland_hydro$X_00060_00000/35.315
-    portland_hydro$depth <- portland_hydro$X_00065_00000/3.28084
+    portland_data$DO.sat <- calc_DO_sat(portland_data$temp.water, # degrees C
+                                       portland_data$pres) # millibars
     
-    portland_stream_data <- merge(portland_stream_data, portland_hydro[,c(3,9,10)], all.x = T)
-    portland_stream_data <- distinct(portland_stream_data, solar.time, .keep_all = T)
-
-    portland_stream_data$discharge <- na.approx(portland_stream_data$discharge)
-    portland_stream_data$depth <- na.approx(portland_stream_data$depth)
-
-    portland_stream_data <- distinct(portland_stream_data, solar.time, .keep_all = T)
+    # filter to keep full model days
+    clean_data <- mm_filter_valid_days(portland_data)$data[,2:8]
     
-    clean_data <- mm_filter_valid_days(boston_stream_data)$data
-    
-    write.csv(clean_data[,c(13, 8, 15, 17, 5, 14, 16)], 
-              file = paste0(my_streams$streamname[i],"_metab_input.csv"), 
+    write.csv(clean_data, 
+              file = paste0(my_streams$CURB_ID[i],"_metab_input.csv"), 
               row.names=F)
-    rm(portland_stream_data)
-    rm(portland_hydro)
+    
+    rm(portland_data)
     rm(clean_data)
   }
 }
